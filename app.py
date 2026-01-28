@@ -4,8 +4,8 @@ app = Flask(__name__)
 
 @app.route("/")
 def root():
-    return jsonify({"ok": True, "msg": "ROOT WORKS"})
+    return jsonify({"ok": True, "msg": "SERVER UP"})
 
 @app.route("/health")
 def health():
-    return jsonify({"ok": True, "msg": "HEALTH WORKS"})
+    return jsonify({"ok": True})
