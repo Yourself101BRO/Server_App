@@ -13,7 +13,6 @@ DB_PATH = os.environ.get("DB_PATH", "maze.db")
 
 ALLOWED_DIFFICULTIES = {"Easy", "Medium", "Hard"}
 
-# Roles
 ROLE_PLAYER = "player"
 ROLE_ADMIN = "admin"
 ROLE_SUPERADMIN = "superadmin"
@@ -70,8 +69,7 @@ def make_token(user_row):
         "username": user_row["username"],
         "role": user_row["role"],
         "iat": now(),
-        # token lifetime: 7 days
-        "exp": now() + 7 * 24 * 3600,
+        "exp": now() + 7 * 24 * 3600,  # 7 days
     }
     return jwt.encode(payload, APP_SECRET, algorithm="HS256")
 
@@ -101,7 +99,7 @@ def auth_required(fn):
         if not user:
             return jsonify({"ok": False, "error": "User not found"}), 401
 
-        request.user = user  # attach
+        request.user = user
         return fn(*args, **kwargs)
     return wrapper
 
@@ -115,10 +113,10 @@ def require_role(min_role):
     def deco(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
-            user = getattr(request, "user", None)
-            if not user:
+            u = getattr(request, "user", None)
+            if not u:
                 return jsonify({"ok": False, "error": "Auth required"}), 401
-            if not role_at_least(user["role"], min_role):
+            if not role_at_least(u["role"], min_role):
                 return jsonify({"ok": False, "error": "Insufficient role"}), 403
             return fn(*args, **kwargs)
         return wrapper
@@ -126,8 +124,7 @@ def require_role(min_role):
 
 
 def clean_username(u: str) -> str:
-    u = (u or "").strip()
-    return u
+    return (u or "").strip()
 
 
 @app.get("/health")
@@ -149,10 +146,9 @@ def register():
     conn = db()
     cur = conn.cursor()
 
-    # First account becomes superadmin
     cur.execute("SELECT COUNT(*) AS c FROM users")
-    c = cur.fetchone()["c"]
-    role = ROLE_SUPERADMIN if c == 0 else ROLE_PLAYER
+    count = cur.fetchone()["c"]
+    role = ROLE_SUPERADMIN if count == 0 else ROLE_PLAYER
 
     try:
         cur.execute(
@@ -164,7 +160,7 @@ def register():
         conn.close()
         return jsonify({"ok": False, "error": "Username already taken"}), 409
 
-    cur.execute("SELECT * FROM users WHERE username = ?", (username,))
+    cur.execute("SELECT * FROM users WHERE username=?", (username,))
     user = cur.fetchone()
     conn.close()
 
@@ -180,11 +176,10 @@ def login():
 
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE username = ?", (username,))
+    cur.execute("SELECT * FROM users WHERE username=?", (username,))
     user = cur.fetchone()
     conn.close()
 
-    # generic message so it doesn’t leak which part is wrong
     if not user or not bcrypt.verify(password, user["pass_hash"]):
         return jsonify({"ok": False, "error": "Invalid username or password"}), 401
 
@@ -199,28 +194,15 @@ def login():
     return jsonify({"ok": True, "token": token, "username": user["username"], "role": user["role"]})
 
 
-@app.get("/me")
-@auth_required
-def me():
-    u = request.user
-    return jsonify({
-        "ok": True,
-        "username": u["username"],
-        "role": u["role"],
-        "banned": bool(u["banned"]),
-        "timeout_until": u["timeout_until"]
-    })
-
-
 @app.get("/leaderboard")
 def leaderboard():
     difficulty = request.args.get("difficulty", "Easy")
     if difficulty not in ALLOWED_DIFFICULTIES:
         return jsonify({"ok": False, "error": "Bad difficulty"}), 400
 
-    limit = request.args.get("limit", "10")
     try:
-        limit = max(1, min(50, int(limit)))
+        limit = int(request.args.get("limit", "10"))
+        limit = max(1, min(50, limit))
     except ValueError:
         limit = 10
 
@@ -263,16 +245,15 @@ def submit_score():
     if not isinstance(best_ms, int):
         return jsonify({"ok": False, "error": "best_ms must be int"}), 400
 
-    # basic sanity check: 0.5s to 30 minutes
     if best_ms < 500 or best_ms > 30 * 60 * 1000:
         return jsonify({"ok": False, "error": "Score out of range"}), 400
 
     conn = db()
     cur = conn.cursor()
 
-    # Upsert: keep best (lowest time)
     cur.execute("SELECT best_ms FROM scores WHERE user_id=? AND difficulty=?", (u["id"], difficulty))
     row = cur.fetchone()
+
     if row is None:
         cur.execute(
             "INSERT INTO scores(user_id, difficulty, best_ms, updated_at) VALUES(?,?,?,?)",
@@ -296,22 +277,25 @@ def submit_score():
     return jsonify({"ok": True, "updated": False, "best_ms": old})
 
 
+# ---- admin helpers ----
 def get_user_by_name(username: str):
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE username = ?", (username,))
-    user = cur.fetchone()
+    cur.execute("SELECT * FROM users WHERE username=?", (username,))
+    row = cur.fetchone()
     conn.close()
-    return user
+    return row
 
 
 def update_user(username: str, **fields):
+    if not fields:
+        return
     keys = list(fields.keys())
     vals = list(fields.values())
     sets = ", ".join([f"{k}=?" for k in keys])
     conn = db()
     cur = conn.cursor()
-    cur.execute(f"UPDATE users SET {sets} WHERE username = ?", (*vals, username))
+    cur.execute(f"UPDATE users SET {sets} WHERE username=?", (*vals, username))
     conn.commit()
     conn.close()
 
@@ -322,8 +306,7 @@ def delete_scores(username: str):
     cur.execute("SELECT id FROM users WHERE username=?", (username,))
     row = cur.fetchone()
     if row:
-        uid = row["id"]
-        cur.execute("DELETE FROM scores WHERE user_id=?", (uid,))
+        cur.execute("DELETE FROM scores WHERE user_id=?", (row["id"],))
     conn.commit()
     conn.close()
 
@@ -368,7 +351,6 @@ def admin_command():
         if not tu:
             return bad("User not found", 404)
 
-        # Admins cannot timeout admins/superadmins; only superadmin can do higher role actions
         if role_at_least(tu["role"], ROLE_ADMIN) and actor["role"] != ROLE_SUPERADMIN:
             return bad("Only superadmin can timeout admins/superadmins", 403)
 
@@ -379,6 +361,7 @@ def admin_command():
         if len(args) != 1:
             return bad("Usage: ban <user>")
         target = args[0]
+
         tu = get_user_by_name(target)
         if not tu:
             return bad("User not found", 404)
@@ -387,13 +370,14 @@ def admin_command():
             return bad("Only superadmin can ban admins/superadmins", 403)
 
         update_user(target, banned=1, timeout_until=0)
-        delete_scores(target)  # remove leaderboard stats
+        delete_scores(target)
         return ok(f"Banned {target} and removed stats")
 
     if cmd == "unban":
         if len(args) != 1:
             return bad("Usage: unban <user>")
         target = args[0]
+
         tu = get_user_by_name(target)
         if not tu:
             return bad("User not found", 404)
@@ -408,6 +392,7 @@ def admin_command():
         if len(args) != 1:
             return bad("Usage: clear_stats <user>")
         target = args[0]
+
         tu = get_user_by_name(target)
         if not tu:
             return bad("User not found", 404)
@@ -423,12 +408,14 @@ def admin_command():
             return bad("Usage: grant_admin <user>")
         if actor["role"] != ROLE_SUPERADMIN:
             return bad("Only superadmin can grant admin", 403)
+
         target = args[0]
         tu = get_user_by_name(target)
         if not tu:
             return bad("User not found", 404)
         if tu["role"] == ROLE_SUPERADMIN:
             return bad("Cannot change superadmin")
+
         update_user(target, role=ROLE_ADMIN)
         return ok(f"Granted admin to {target}")
 
@@ -437,12 +424,14 @@ def admin_command():
             return bad("Usage: revoke_admin <user>")
         if actor["role"] != ROLE_SUPERADMIN:
             return bad("Only superadmin can revoke admin", 403)
+
         target = args[0]
         tu = get_user_by_name(target)
         if not tu:
             return bad("User not found", 404)
         if tu["role"] != ROLE_ADMIN:
             return bad("Target is not admin")
+
         update_user(target, role=ROLE_PLAYER)
         return ok(f"Revoked admin from {target}")
 
@@ -451,4 +440,3 @@ def admin_command():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
-
